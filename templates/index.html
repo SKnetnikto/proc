@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L1 Cache Size Detector</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 800px;
+      margin: 2rem auto;
+      padding: 1rem;
+      line-height: 1.6;
+      background: #f9f9f9;
+    }
+    h1 { color: #c62828; text-align: center; }
+    button {
+      display: block;
+      margin: 2rem auto;
+      padding: 1rem 2.5rem;
+      font-size: 1.2rem;
+      background: #c62828;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button:hover { background: #b71c1c; }
+    #status {
+      text-align: center;
+      font-size: 1.1rem;
+      margin: 1rem 0;
+      color: #555;
+    }
+    #result {
+      background: white;
+      padding: 1.5rem;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      margin: 1rem 0;
+    }
+    #details {
+      background: #f0f0f0;
+      padding: 1rem;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 0.9rem;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    canvas {
+      display: block;
+      margin: 1.5rem auto;
+      max-width: 100%;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Определение размера L1-кэша (Data)</h1>
+
+<p style="text-align:center;">
+  Тест использует pointer chasing в WebAssembly.<br>
+  Запускаем цепочку указателей разного размера и ищем скачок задержки.
+</p>
+
+<button onclick="startCacheTest()">Запустить тест L1</button>
+
+<div id="status">Ожидание запуска…</div>
+<div id="result" style="display:none;"></div>
+<canvas id="latencyChart" width="600" height="300" style="display:none;"></canvas>
+<pre id="details" style="display:none;"></pre>
+
+<script type="module">
+  import { startTest } from '/static/js/main.js';
+
+  window.startCacheTest = async function() {
+    const status = document.getElementById('status');
+    const resultDiv = document.getElementById('result');
+    const chartCanvas = document.getElementById('latencyChart');
+    const details = document.getElementById('details');
+
+    status.textContent = 'Запуск теста... Это может занять 10–60 секунд';
+    resultDiv.style.display = 'none';
+    chartCanvas.style.display = 'none';
+    details.style.display = 'none';
+
+    try {
+      const report = await startTest();
+
+      // Простой вывод
+      let html = `<strong>Оценка размера L1 Data Cache (per core):</strong> ${report.estimatedL1SizeKB || '?'} KB<br><br>`;
+      html += `<strong>Основные метрики:</strong><br>`;
+      html += `• Кол-во ядер: ${report.navigator?.hardwareConcurrency || '?'}<br>`;
+      html += `• Время на самый быстрый размер: ${report.minLatency?.toFixed(2) || '?'} мс<br>`;
+      html += `• Скачок latency: ${report.latencyJump?.toFixed(0) || '?'} мс<br>`;
+
+      resultDiv.innerHTML = html;
+      resultDiv.style.display = 'block';
+
+      // График latency vs размер
+      if (report.sizes && report.latencies) {
+        drawLatencyChart(chartCanvas, report.sizes, report.latencies);
+        chartCanvas.style.display = 'block';
+      }
+
+      // Детали
+      details.textContent = JSON.stringify(report, null, 2);
+      details.style.display = 'block';
+
+      status.textContent = 'Тест завершён';
+    } catch (err) {
+      status.textContent = 'Ошибка: ' + err.message;
+      console.error(err);
+    }
+  };
+
+  function drawLatencyChart(canvas, sizes, latencies) {
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = '#f0f0f0';
+    ctx.fillRect(0, 0, width, height);
+
+    // Оси
+    ctx.beginPath();
+    ctx.moveTo(40, height - 40);
+    ctx.lineTo(width - 20, height - 40);
+    ctx.moveTo(40, height - 40);
+    ctx.lineTo(40, 20);
+    ctx.strokeStyle = '#888';
+    ctx.stroke();
+
+    // Метки
+    ctx.fillStyle = '#333';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('Размер (KB)', width / 2, height - 10);
+    ctx.save();
+    ctx.translate(15, height / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('Среднее время на итерацию (мс)', 0, 0);
+    ctx.restore();
+
+    // Данные
+    const maxLatency = Math.max(...latencies);
+    const minLatency = Math.min(...latencies);
+    const range = maxLatency - minLatency || 1;
+
+    const points = sizes.map((size, i) => ({
+      x: 40 + (size / Math.max(...sizes)) * (width - 80),
+      y: height - 40 - ((latencies[i] - minLatency) / range) * (height - 80)
+    }));
+
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    points.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.strokeStyle = '#c62828';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Точки
+    points.forEach(p => {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#c62828';
+      ctx.fill();
+    });
+  }
+</script>
+
+</body>
+</html>
