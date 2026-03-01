@@ -1,55 +1,83 @@
 // static/js/probes/cacheProbe.js
 
-/**
- * Тест кэша v10.0 — Парные значения вокруг степеней двойки
- * Для каждого 2^n тестируем (2^n - 2) и (2^n + 2)
- */
+let wasmModule = null;
+let wasmMemory = null;
+
+// 🔥 Функция для вывода логов на страницу
+function logToPage(message, type = 'info') {
+    const logDiv = document.getElementById('wasm-log');
+    if (logDiv) {
+        const color = type === 'error' ? 'red' : type === 'success' ? 'green' : '#555';
+        logDiv.innerHTML += `<div style="color:${color}; font-size:0.8rem;">${message}</div>`;
+    }
+    console.log('[PROBE]', message);
+}
+
+async function initWasm() {
+    if (wasmModule) return true;
+    
+    try {
+        logToPage('Loading WASM...');
+        
+        const response = await fetch('/static/probe.wasm');
+        if (!response.ok) throw new Error('WASM file not found: ' + response.status + ' ' + response.statusText);
+        
+        const bytes = await response.arrayBuffer();
+        logToPage('WASM loaded: ' + bytes.byteLength + ' bytes');
+        
+        const { instance } = await WebAssembly.instantiate(bytes);
+        
+        wasmModule = instance.exports;
+        wasmMemory = instance.exports.memory || null;
+        
+        logToPage('Memory: ' + (wasmMemory ? 'OK' : 'NONE'), 'success');
+        logToPage('run_test: ' + (typeof wasmModule.run_test === 'function' ? 'OK' : 'MISSING'), 'success');
+        
+        return true;
+    } catch (err) {
+        logToPage('WASM ERROR: ' + err.message, 'error');
+        return false;
+    }
+}
+
 export async function runCacheProbe() {
     const result = {
         wasmOk: false,
         sizes: [],
         latencies: [],
         coreCount: navigator.hardwareConcurrency || 1,
-        estimatedL3SizeKB: null,
+        cacheLevels: { l1: null, l2: null, l3: null },
         cacheAnalysis: {}
     };
 
-    console.log('[PROBE] Starting cache probe v10.0 (pair testing)...');
-    console.log('[PROBE] CPU Cores:', result.coreCount);
+    logToPage('Starting cache probe v11.0...');
+    logToPage('CPU Cores: ' + result.coreCount);
 
-    // 🔥 Парные значения вокруг степеней двойки (в KB)
-    // 4±2, 8±2, 16±2, 32±2, 64±2, 128±2, 256±2, 512±2, 1024±2, 2048±2, 4096±2
     const testSizesKB = [
-        2, 6,       // вокруг 4
-        6, 10,      // вокруг 8
-        14, 18,     // вокруг 16
-        30, 34,     // вокруг 32
-        62, 66,     // вокруг 64
-        126, 130,   // вокруг 128
-        254, 258,   // вокруг 256
-        510, 514,   // вокруг 512
-        1022, 1026, // вокруг 1024
-        2046, 2050, // вокруг 2048
-        4094, 4098  // вокруг 4096
+        2, 6, 6, 10, 14, 18, 30, 34, 62, 66,
+        126, 130, 254, 258, 510, 514, 1022, 1026, 2046, 2050, 4094, 4098
     ];
 
     result.sizes = testSizesKB;
     result.latencies = [];
 
+    result.wasmOk = await initWasm();
+    logToPage('WASM available: ' + result.wasmOk, result.wasmOk ? 'success' : 'error');
+
     for (const sizeKB of testSizesKB) {
         const bytes = sizeKB * 1024;
-        console.log(`[PROBE] Testing size: ${sizeKB} KB`);
+        logToPage('Testing: ' + sizeKB + ' KB');
         
         try {
             const latency = await measurePointerChasing(bytes);
             result.latencies.push(latency);
-            console.log(`[PROBE] Result: ${latency.toFixed(6)} ms`);
+            logToPage('Result: ' + latency.toFixed(6) + ' ms');
         } catch (err) {
-            console.warn(`[PROBE ERROR] Size ${sizeKB} KB failed:`, err);
+            logToPage('ERROR ' + sizeKB + ' KB: ' + err.message, 'error');
             result.latencies.push(null);
         }
 
-        await new Promise(r => setTimeout(r, 50));
+        await new Promise(r => setTimeout(r, 30));
     }
 
     // Монотонность
@@ -61,133 +89,89 @@ export async function runCacheProbe() {
         }
     }
 
-    // Анализ
-    result.cacheAnalysis = analyzePairs(result.sizes, result.latencies);
-    result.estimatedL3SizeKB = result.cacheAnalysis.l3Boundary;
+    result.cacheAnalysis = detectAllTransitions(result.sizes, result.latencies);
+    result.cacheLevels = result.cacheAnalysis.levels;
 
-    console.log('[PROBE] Analysis:', result.cacheAnalysis);
+    logToPage('L1: ' + result.cacheLevels.l1 + ', L2: ' + result.cacheLevels.l2 + ', L3: ' + result.cacheLevels.l3, 'success');
 
     return result;
 }
 
 async function measurePointerChasing(bufferSize) {
-    const buffer = new Uint32Array(bufferSize / 4);
-    const stride = 16;
-    const numNodes = Math.floor(buffer.length / stride) - 2;
-    
-    if (numNodes < 10) return 0;
-
-    for (let i = 0; i < numNodes; i++) {
-        buffer[i * stride] = ((i + 1) % numNodes) * stride;
-    }
-
-    // 🔥 Уменьшено до 5 итераций для скорости
-    const iterations = 5;
+    const iterations = 100;
     const numRuns = 3;
     const samples = [];
 
     for (let run = 0; run < numRuns; run++) {
-        let idx = 0;
-        for (let i = 0; i < 100; i++) { idx = buffer[idx]; }
+        if (wasmModule && wasmModule.run_test) {
+            wasmModule.run_test(bufferSize, 16, 10);
+        }
 
         const start = performance.now();
-        for (let iter = 0; iter < iterations; iter++) {
-            for (let i = 0; i < numNodes; i++) { idx = buffer[idx]; }
+        
+        if (wasmModule && wasmModule.run_test) {
+            wasmModule.run_test(bufferSize, 16, iterations);
         }
+        
         const end = performance.now();
         
-        samples.push((end - start) / iterations);
-        await new Promise(r => setTimeout(r, 5));
+        const avgMs = (end - start) / iterations;
+        samples.push(avgMs);
+        
+        await new Promise(r => setTimeout(r, 3));
     }
 
     if (samples.length === 0) return 0;
-    const sum = samples.reduce((a, b) => a + b, 0);
-    return parseFloat((sum / samples.length).toFixed(6));
+    
+    samples.sort((a, b) => a - b);
+    const median = samples[Math.floor(samples.length / 2)];
+    
+    return parseFloat(median.toFixed(6));
 }
 
-/**
- * 🔥 Анализ парных значений
- * Сравнивает задержки между парами вокруг каждой степени двойки
- */
-function analyzePairs(sizes, latencies) {
-    const analysis = {
-        l3Boundary: null,
-        pairs: [],
-        biggestJump: null
-    };
-
+function detectAllTransitions(sizes, latencies) {
+    const analysis = { levels: { l1: null, l2: null, l3: null }, allJumps: [], top3: [] };
     if (!sizes || sizes.length === 0) return analysis;
 
-    // Группируем по парам
-    const pairs = [];
-    for (let i = 0; i < sizes.length - 1; i += 2) {
-        const size1 = sizes[i];
-        const size2 = sizes[i + 1];
-        const lat1 = latencies[i];
-        const lat2 = latencies[i + 1];
-        
-        if (lat1 && lat2 && lat1 > 0 && lat2 > 0) {
-            const jump = lat2 - lat1;
-            const relJump = jump / lat1;
-            const center = (size1 + size2) / 2;
-            
-            pairs.push({
-                size1: size1,
-                size2: size2,
-                lat1: lat1,
-                lat2: lat2,
-                jump: jump,
-                relJump: relJump,
-                center: center
-            });
+    const jumps = [];
+    for (let i = 2; i < sizes.length; i++) {
+        const prev = latencies[i - 1];
+        const curr = latencies[i];
+        if (!prev || !curr || prev <= 0 || curr <= 0) continue;
+        const absJump = curr - prev;
+        const relJump = absJump / prev;
+        if (absJump > 0.0005 && relJump > 0.10) {
+            jumps.push({ index: i, size: sizes[i], absJump, relJump, latency: curr });
         }
     }
 
-    analysis.pairs = pairs.map(p => ({
-        size1: p.size1,
-        size2: p.size2,
-        lat1: parseFloat(p.lat1.toFixed(6)),
-        lat2: parseFloat(p.lat2.toFixed(6)),
-        jump: parseFloat(p.jump.toFixed(6)),
-        relJump: parseFloat((p.relJump * 100).toFixed(1)) + '%'
-    }));
+    analysis.allJumps = jumps.map(j => ({ size: j.size, absJump: parseFloat(j.absJump.toFixed(6)), relJump: parseFloat((j.relJump * 100).toFixed(1)) + '%' }));
 
-    // Находим пару с наибольшим скачком
-    if (pairs.length > 0) {
-        pairs.sort((a, b) => b.jump - a.jump);
-        const best = pairs[0];
-        
-        analysis.biggestJump = {
-            size1: best.size1,
-            size2: best.size2,
-            lat1: parseFloat(best.lat1.toFixed(6)),
-            lat2: parseFloat(best.lat2.toFixed(6)),
-            jump: parseFloat(best.jump.toFixed(6)),
-            relJump: parseFloat((best.relJump * 100).toFixed(1)) + '%'
-        };
-        
-        // L3 = центр пары с наибольшим скачком, округлённый до степени двойки
-        analysis.l3Boundary = roundToPowerOf2(best.center);
-    }
+    if (jumps.length === 0) return analysis;
+
+    jumps.sort((a, b) => (b.relJump * b.absJump) - (a.relJump * a.absJump));
+
+    const l1Candidates = jumps.filter(j => j.size >= 32 && j.size <= 256);
+    const l2Candidates = jumps.filter(j => j.size >= 256 && j.size <= 1024);
+    const l3Candidates = jumps.filter(j => j.size >= 1024);
+
+    if (l1Candidates.length > 0) { l1Candidates.sort((a, b) => b.relJump - a.relJump); analysis.levels.l1 = roundToPowerOf2(l1Candidates[0].size); }
+    if (l2Candidates.length > 0) { l2Candidates.sort((a, b) => b.relJump - a.relJump); analysis.levels.l2 = roundToPowerOf2(l2Candidates[0].size); }
+    if (l3Candidates.length > 0) { l3Candidates.sort((a, b) => b.relJump - a.relJump); analysis.levels.l3 = roundToPowerOf2(l3Candidates[0].size); }
+
+    analysis.top3 = jumps.slice(0, 3).map(j => ({ size: j.size, absJump: parseFloat(j.absJump.toFixed(6)), relJump: parseFloat((j.relJump * 100).toFixed(1)) + '%', level: j.size >= 1024 ? 'L3→RAM' : j.size >= 256 ? 'L2→L3' : 'L1→L2' }));
 
     return analysis;
 }
 
 function roundToPowerOf2(value) {
-    if (value <= 0) return 2048;
-    
-    const cacheSizes = [256, 512, 1024, 2048, 4096, 8192];
-    
+    if (value <= 0) return null;
+    const cacheSizes = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
     let closest = cacheSizes[0];
     let minDiff = Math.abs(value - closest);
-    
     for (const size of cacheSizes) {
         const diff = Math.abs(value - size);
-        if (diff < minDiff) {
-            minDiff = diff;
-            closest = size;
-        }
+        if (diff < minDiff) { minDiff = diff; closest = size; }
     }
-    
     return closest;
 }

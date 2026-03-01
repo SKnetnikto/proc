@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>L3 Cache Detector</title>
+    <title>Cache Detector v11</title>
     <style>
         body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 1rem; background: #f9f9f9; }
         h1 { color: #c62828; text-align: center; }
@@ -12,17 +12,23 @@
         button:disabled { background: #ccc; cursor: not-allowed; }
         #status { text-align: center; font-size: 1.1rem; margin: 1rem 0; color: #555; }
         #result { background: white; padding: 1.5rem; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin: 1rem 0; }
-        #details { background: #f0f0f0; padding: 1rem; border-radius: 6px; font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; max-height: 400px; overflow-y: auto; }
+        #details { background: #f0f0f0; padding: 1rem; border-radius: 6px; font-family: monospace; font-size: 0.8rem; white-space: pre-wrap; max-height: 400px; overflow-y: auto; }
+        #wasm-log { background: #263238; color: #aed581; padding: 1rem; border-radius: 6px; font-family: monospace; font-size: 0.75rem; max-height: 200px; overflow-y: auto; margin: 1rem 0; }
         .error { color: #d32f2f; font-weight: bold; }
         .success { color: #2e7d32; font-weight: bold; }
+        .level { margin: 0.5rem 0; padding: 0.5rem; background: #ffebee; border-radius: 4px; }
     </style>
 </head>
 <body>
-    <h1>🖥️ L3 Cache Detector</h1>
-    <p style="text-align:center;">Определение размера L3 кэша и количества ядер</p>
+    <h1>🖥️ Cache Detector v11</h1>
+    <p style="text-align:center;">L1→L2, L2→L3, L3→RAM</p>
     
     <button id="startBtn" onclick="startTest()">Запустить тест</button>
-    <div id="status">Ожидание запуска…</div>
+    <div id="status">Ожидание…</div>
+    
+    <!-- 🔥 Блок для логов WASM -->
+    <div id="wasm-log" style="display:none;"></div>
+    
     <div id="result" style="display:none;"></div>
     <pre id="details" style="display:none;"></pre>
 
@@ -34,9 +40,13 @@
             const resultDiv = document.getElementById('result');
             const details = document.getElementById('details');
             const startBtn = document.getElementById('startBtn');
+            const wasmLog = document.getElementById('wasm-log');
+            
+            wasmLog.style.display = 'block';
+            wasmLog.innerHTML = '<div>Initializing...</div>';
             
             startBtn.disabled = true;
-            status.textContent = '🔄 Запуск теста... 30–60 секунд';
+            status.textContent = '🔄 Запуск... ~15 секунд';
             status.className = '';
             resultDiv.style.display = 'none';
             details.style.display = 'none';
@@ -45,42 +55,41 @@
                 const report = await startTest();
                 
                 let html = '';
-                if (report.error) {
-                    throw new Error(report.error);
-                }
+                if (report.error) throw new Error(report.error);
                 
-                html += `<strong>🖥️ Ядер CPU:</strong> ${report.coreCount || '?'}<br>`;
-                html += `<strong>🎯 L3 Cache:</strong> ${report.estimatedL3SizeKB || '?'} KB<br><br>`;
+                html += `<strong>🖥️ Ядер:</strong> ${report.coreCount}<br>`;
+                html += `<strong>🔧 WASM:</strong> ${report.wasmOk ? '✓' : '✗'}<br><br>`;
                 
-                if (report.cacheAnalysis?.topJump) {
-                    const j = report.cacheAnalysis.topJump;
-                    html += `<strong>📊 Скачок задержки:</strong><br>`;
-                    html += `• Размер: ${j.size} KB<br>`;
-                    html += `• Рост: ${j.absJump} мс (${j.relJump})<br>`;
+                const levels = report.cacheLevels || {};
+                html += `<div class="level"><strong>L1→L2:</strong> ${levels.l1 || '?'} KB</div>`;
+                html += `<div class="level"><strong>L2→L3:</strong> ${levels.l2 || '?'} KB</div>`;
+                html += `<div class="level"><strong>L3→RAM:</strong> ${levels.l3 || '?'} KB</div>`;
+                
+                if (report.cacheAnalysis?.top3) {
+                    html += `<br><strong>📊 Топ-3 скачка:</strong><br>`;
+                    report.cacheAnalysis.top3.forEach((t, i) => {
+                        html += `${i+1}. ${t.size} KB: ${t.absJump} ms (${t.relJump}) [${t.level}]<br>`;
+                    });
                 }
                 
                 resultDiv.innerHTML = html;
                 resultDiv.style.display = 'block';
-                status.textContent = '✓ Тест завершён';
+                status.textContent = '✓ Готово';
                 status.className = 'success';
                 
                 details.textContent = JSON.stringify(report, null, 2);
                 details.style.display = 'block';
                 
-                // Отправка логов
-                try {
-                    await fetch('/api/log', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(report)
-                    });
-                } catch (e) { console.error('Log error:', e); }
+                await fetch('/api/log', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(report)
+                });
                 
             } catch (err) {
-                status.textContent = '✗ Ошибка: ' + err.message;
+                status.textContent = '✗ ' + err.message;
                 status.className = 'error';
-                resultDiv.innerHTML = `<span class="error">${err.message}</span>`;
-                resultDiv.style.display = 'block';
+                wasmLog.innerHTML += `<div style="color:red;">ERROR: ${err.message}</div>`;
             } finally {
                 startBtn.disabled = false;
             }
